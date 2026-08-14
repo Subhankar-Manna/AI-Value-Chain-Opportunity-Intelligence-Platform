@@ -1,0 +1,28 @@
+# Virtual environments
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
+
+# Local vector stores / generated indexes
+faiss_index/
+chroma/
+chroma_db/
+vectorstore/
+
+# Temporary files
+*.tmp
+*.temp
