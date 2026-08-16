@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 
 
-API_URL = "http://127.0.0.1:8000"
+API_URL = "https://ai-value-chain-opportunity-intelligence.onrender.com"
 
 
 
@@ -172,8 +172,8 @@ if selected_label == "➕ New Industry → User Input":
     )
 
     st.write(
-        "Enter an industry name and Qwen will generate "
-        "a realistic end-to-end value chain."
+         "Enter an industry name and Gemini will generate "
+         "a realistic end-to-end value chain."
     )
 
     new_industry_name = st.text_input(
@@ -183,7 +183,7 @@ if selected_label == "➕ New Industry → User Input":
 
 
     if st.button(
-        "🤖 Generate Industry with Qwen",
+        "🤖 Generate Industry with Gemini",
         type="primary"
     ):
 
@@ -196,7 +196,7 @@ if selected_label == "➕ New Industry → User Input":
         else:
 
             with st.spinner(
-                f"Qwen is generating the {new_industry_name} value chain..."
+                f"Gemini is generating the {new_industry_name} value chain..."
             ):
 
                 try:
@@ -573,7 +573,7 @@ if processes:
     ):
 
         with st.spinner(
-            "Qwen is analysing this business process..."
+            "Gemini is analysing this business process..."
         ):
 
             try:
