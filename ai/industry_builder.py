@@ -1,8 +1,8 @@
 import json
-import ollama
+from google import genai
+from google.genai import types
 
-
-MODEL_NAME = "qwen2.5:1.5b"
+MODEL_NAME = "gemini-3.5-flash"
 
 
 INDUSTRY_SCHEMA = {
@@ -56,13 +56,21 @@ INDUSTRY_SCHEMA = {
 }
 
 
+# Create Gemini client.
+# The client automatically reads GEMINI_API_KEY
+# from the environment.
+client = genai.Client()
+
+
 def build_industry(industry_name: str):
 
     # Clean user input
-    industry_name = industry_name.strip()
+    industry_name = (industry_name or "").strip()
 
     if not industry_name:
-        raise ValueError("Industry name cannot be empty.")
+        raise ValueError(
+            "Industry name cannot be empty."
+        )
 
     prompt = f"""
 You are an enterprise business transformation analyst.
@@ -114,31 +122,44 @@ Selected Industry:
 {industry_name}
 """
 
-    response = ollama.chat(
-        model=MODEL_NAME,
-        messages=[
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        format=INDUSTRY_SCHEMA
-    )
-
-    content = response["message"]["content"]
-
     try:
+
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=INDUSTRY_SCHEMA,
+                temperature=0.2
+            )
+        )
+
+        content = response.text
+
+        if not content:
+            raise ValueError(
+                "Gemini returned an empty response."
+            )
+
         result = json.loads(content)
+
     except json.JSONDecodeError as e:
+
         raise ValueError(
-            f"AI returned invalid JSON: {e}"
+            f"Gemini returned invalid JSON: {str(e)}"
+        )
+
+    except Exception as e:
+
+        raise RuntimeError(
+            f"Gemini industry generation failed: {str(e)}"
         )
 
     # Make sure the returned industry is present
     if not result.get("industry"):
         result["industry"] = industry_name
 
-    # Basic validation
+    # Validate stages
     if "stages" not in result:
         raise ValueError(
             "AI response does not contain value-chain stages."
@@ -150,3 +171,4 @@ Selected Industry:
         )
 
     return result
+

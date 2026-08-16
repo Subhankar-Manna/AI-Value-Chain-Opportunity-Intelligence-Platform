@@ -1,12 +1,13 @@
 import json
-import ollama
+from google import genai
+from google.genai import types
+
+MODEL_NAME = "gemini-3.5-flash"
 
 
-MODEL_NAME = "qwen2.5:1.5b"
-
-
-
+# ============================================================
 # AI ANALYSIS SCHEMA
+# ============================================================
 
 ANALYSIS_SCHEMA = {
     "type": "object",
@@ -48,8 +49,6 @@ ANALYSIS_SCHEMA = {
             "type": "number"
         },
 
-        # Research Evidence
-
         "research_title": {
             "type": "string"
         },
@@ -69,12 +68,10 @@ ANALYSIS_SCHEMA = {
         "ai_capability",
         "expected_benefit",
         "risk",
-
         "value_score",
         "feasibility_score",
         "risk_score",
         "confidence_score",
-
         "research_title",
         "research_source_type",
         "research_evidence"
@@ -82,7 +79,16 @@ ANALYSIS_SCHEMA = {
 }
 
 
+# ============================================================
+# GEMINI CLIENT
+# ============================================================
+
+client = genai.Client()
+
+
+# ============================================================
 # ANALYZE PROCESS
+# ============================================================
 
 def analyze_process(
     process_name: str,
@@ -91,9 +97,9 @@ def analyze_process(
     stage_name: str = ""
 ):
     """
-    Analyse a value-chain process using the local Qwen model.
+    Analyse a value-chain process using Gemini.
 
-    The function generates:
+    Generates:
 
     - Business problem
     - AI opportunity
@@ -102,22 +108,11 @@ def analyze_process(
     - Risk
     - Priority-related scores
     - Research evidence/context
-
-    Parameters:
-        process_name:
-            Name of the business process.
-
-        process_description:
-            Description of the business process.
-
-        industry:
-            Industry to which the process belongs.
-
-        stage_name:
-            Value-chain stage containing the process.
     """
 
-
+    # --------------------------------------------------------
+    # Clean input
+    # --------------------------------------------------------
 
     process_name = (
         process_name or ""
@@ -139,18 +134,18 @@ def analyze_process(
         else "the relevant value-chain stage"
     )
 
-
-
-    # VALIDATION
+    # --------------------------------------------------------
+    # Validation
+    # --------------------------------------------------------
 
     if not process_name:
-
         raise ValueError(
             "Process name cannot be empty."
         )
 
-
-    
+    # --------------------------------------------------------
+    # Prompt
+    # --------------------------------------------------------
 
     prompt = f"""
 You are an enterprise AI transformation analyst.
@@ -169,10 +164,6 @@ Process:
 
 Process Description:
 {process_description}
-
-
-Your task is to identify realistic opportunities where
-AI can create measurable business value in this process.
 
 
 ==================================================
@@ -310,10 +301,6 @@ Process:
 Create a concise title describing the AI application
 or research topic relevant to this process.
 
-Example:
-
-"AI Applications in Healthcare Patient Assessment"
-
 
 11. research_source_type
 
@@ -366,41 +353,47 @@ IMPORTANT RULES
 - Do not include explanations outside the JSON.
 """
 
+    # --------------------------------------------------------
+    # CALL GEMINI
+    # --------------------------------------------------------
 
-    # CALL QWEN
     try:
 
-        response = ollama.chat(
+        response = client.models.generate_content(
             model=MODEL_NAME,
-
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-
-            format=ANALYSIS_SCHEMA
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=ANALYSIS_SCHEMA,
+                temperature=0.2
+            )
         )
 
-        content = response["message"]["content"]
+        content = response.text
+
+        if not content:
+            raise ValueError(
+                "Gemini returned an empty response."
+            )
 
         result = json.loads(content)
 
     except json.JSONDecodeError as e:
 
         raise RuntimeError(
-            f"Ollama returned invalid JSON: {str(e)}"
+            f"Gemini returned invalid JSON: {str(e)}"
         )
 
     except Exception as e:
 
         raise RuntimeError(
-            f"Ollama AI analysis failed: {str(e)}"
+            f"Gemini AI analysis failed: {str(e)}"
         )
 
-
+    # --------------------------------------------------------
     # VALIDATE REQUIRED TEXT FIELDS
+    # --------------------------------------------------------
+
     text_fields = [
         "business_problem",
         "ai_opportunity",
@@ -415,20 +408,20 @@ IMPORTANT RULES
     for field in text_fields:
 
         if field not in result:
-
             result[field] = ""
 
         elif result[field] is None:
-
             result[field] = ""
 
         else:
-
             result[field] = str(
                 result[field]
             ).strip()
 
+    # --------------------------------------------------------
     # VALIDATE AND NORMALIZE SCORES
+    # --------------------------------------------------------
+
     score_fields = [
         "value_score",
         "feasibility_score",
@@ -464,24 +457,26 @@ IMPORTANT RULES
             1
         )
 
-
+    # --------------------------------------------------------
     # FALLBACK RESEARCH TITLE
+    # --------------------------------------------------------
+
     if not result["research_title"]:
 
         result["research_title"] = (
             f"AI Applications in {process_name}"
         )
 
-
     # FALLBACK SOURCE TYPE
+
     if not result["research_source_type"]:
 
         result["research_source_type"] = (
             "Research / Industry"
         )
 
-
     # FALLBACK RESEARCH EVIDENCE
+
     if not result["research_evidence"]:
 
         result["research_evidence"] = (
@@ -490,6 +485,5 @@ IMPORTANT RULES
             f"analysis, decision making and process "
             f"efficiency within the {industry_context} industry."
         )
-
 
     return result
