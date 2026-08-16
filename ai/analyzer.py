@@ -82,9 +82,7 @@ ANALYSIS_SCHEMA = {
 }
 
 
-# ==================================================
 # ANALYZE PROCESS
-# ==================================================
 
 def analyze_process(
     process_name: str,
