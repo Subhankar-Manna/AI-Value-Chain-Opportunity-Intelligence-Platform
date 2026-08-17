@@ -1,21 +1,38 @@
-import streamlit as st
-import requests
+import os
 import time
+import requests
+import streamlit as st
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-API_URL = "https://ai-value-chain-opportunity-intelligence.onrender.com"
+API_URL = os.getenv(
+    "API_URL",
+    "https://ai-value-chain-opportunity-intelligence.onrender.com"
+).rstrip("/")
+
+
+# Render Free services can take some time to wake up.
+HEALTH_RETRY_ATTEMPTS = 8
+HEALTH_RETRY_DELAYS = [2, 3, 5, 7, 10, 12, 15, 15]
 
 REQUEST_TIMEOUT = 30
-MAX_RETRIES = 4
-RETRY_DELAY = 3
+
+RETRYABLE_STATUS_CODES = {
+    408,
+    425,
+    429,
+    500,
+    502,
+    503,
+    504
+}
 
 
 # ============================================================
-# PAGE CONFIGURATION
+# STREAMLIT PAGE CONFIG
 # ============================================================
 
 st.set_page_config(
@@ -37,103 +54,290 @@ if "selected_industry_name" not in st.session_state:
 
 
 # ============================================================
-# BACKEND CONNECTION HELPERS
+# HTTP SESSION
 # ============================================================
 
-def backend_health_check():
-    """
-    Check whether the FastAPI backend is available.
-    Uses the /health endpoint before making normal API requests.
-    """
+@st.cache_resource
+def get_http_session():
 
-    try:
-        response = requests.get(
-            f"{API_URL}/health",
-            timeout=REQUEST_TIMEOUT
-        )
+    session = requests.Session()
 
-        if response.status_code == 200:
-            try:
-                data = response.json()
+    session.headers.update({
+        "User-Agent": "AI-Value-Chain-Streamlit-Frontend/1.0"
+    })
 
-                if data.get("status") == "healthy":
-                    return True
-
-            except ValueError:
-                pass
-
-    except requests.exceptions.RequestException:
-        pass
-
-    return False
+    return session
 
 
-def wait_for_backend():
-    """
-    Try several times to wake up/connect to the Render backend.
-    """
-
-    for attempt in range(1, MAX_RETRIES + 1):
-
-        if backend_health_check():
-            return True
-
-        if attempt < MAX_RETRIES:
-            time.sleep(RETRY_DELAY)
-
-    return False
+session = get_http_session()
 
 
-def api_request(
+# ============================================================
+# BACKEND ERROR CLASS
+# ============================================================
+
+class BackendUnavailableError(Exception):
+    pass
+
+
+# ============================================================
+# LOW-LEVEL REQUEST FUNCTION
+# ============================================================
+
+def make_request(
     method,
     endpoint,
-    **kwargs
+    *,
+    json=None,
+    timeout=REQUEST_TIMEOUT
 ):
-    """
-    Centralized API request function.
-
-    Every API request gets retry handling so that a temporary
-    Render/network problem does not immediately break Streamlit.
-    """
 
     url = f"{API_URL}{endpoint}"
 
+    try:
+
+        response = session.request(
+            method=method,
+            url=url,
+            json=json,
+            timeout=timeout
+        )
+
+        # Successful response
+        if 200 <= response.status_code < 300:
+            return response
+
+        # Temporary / retryable server response
+        if response.status_code in RETRYABLE_STATUS_CODES:
+
+            raise BackendUnavailableError(
+                f"Backend returned HTTP {response.status_code}"
+            )
+
+        # Permanent HTTP error
+        response.raise_for_status()
+
+        return response
+
+    except requests.exceptions.Timeout as e:
+
+        raise BackendUnavailableError(
+            f"Backend request timed out: {e}"
+        ) from e
+
+    except requests.exceptions.ConnectionError as e:
+
+        raise BackendUnavailableError(
+            f"Could not connect to backend: {e}"
+        ) from e
+
+    except requests.exceptions.RequestException as e:
+
+        raise BackendUnavailableError(
+            f"Backend request failed: {e}"
+        ) from e
+
+
+# ============================================================
+# BACKEND HEALTH / WAKE-UP
+# ============================================================
+
+def wait_for_backend(
+    show_status=True
+):
+
     last_error = None
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    if show_status:
+
+        status_box = st.empty()
+
+    else:
+
+        status_box = None
+
+
+    for attempt in range(HEALTH_RETRY_ATTEMPTS):
+
+        attempt_number = attempt + 1
 
         try:
 
-            response = requests.request(
-                method,
-                url,
-                timeout=REQUEST_TIMEOUT,
-                **kwargs
+            if status_box:
+
+                if attempt_number == 1:
+
+                    status_box.info(
+                        "🔄 Connecting to the FastAPI backend..."
+                    )
+
+                else:
+
+                    status_box.info(
+                        f"🔄 Backend is starting... "
+                        f"Retry {attempt_number}/{HEALTH_RETRY_ATTEMPTS}"
+                    )
+
+
+            response = session.get(
+                f"{API_URL}/health",
+                timeout=REQUEST_TIMEOUT
             )
 
-            # Successful response
-            if 200 <= response.status_code < 300:
-                return response
 
-            # Server-side temporary error
-            if response.status_code >= 500:
+            if response.status_code == 200:
 
-                last_error = requests.exceptions.HTTPError(
-                    f"Backend returned HTTP {response.status_code}"
-                )
+                try:
 
-            else:
-                response.raise_for_status()
+                    data = response.json()
+
+                except ValueError:
+
+                    data = {}
+
+
+                if data.get("status") == "healthy":
+
+                    if status_box:
+
+                        status_box.success(
+                            "✅ FastAPI backend is ready."
+                        )
+
+                        time.sleep(0.5)
+
+                        status_box.empty()
+
+                    return True
+
+
+                # Even if the response is 200 but does not contain
+                # the expected JSON, consider the server reachable.
+                if status_box:
+
+                    status_box.success(
+                        "✅ FastAPI backend is reachable."
+                    )
+
+                    time.sleep(0.5)
+
+                    status_box.empty()
+
+                return True
+
+
+            last_error = (
+                f"FastAPI returned HTTP "
+                f"{response.status_code}"
+            )
+
+
+        except requests.exceptions.Timeout as e:
+
+            last_error = (
+                f"Backend timeout: {str(e)}"
+            )
+
+
+        except requests.exceptions.ConnectionError as e:
+
+            last_error = (
+                f"Connection error: {str(e)}"
+            )
+
 
         except requests.exceptions.RequestException as e:
 
+            last_error = (
+                f"Request error: {str(e)}"
+            )
+
+
+        # Wait before next attempt
+        if attempt < HEALTH_RETRY_ATTEMPTS - 1:
+
+            delay = HEALTH_RETRY_DELAYS[attempt]
+
+            if status_box:
+
+                status_box.warning(
+                    f"⏳ FastAPI is waking up or temporarily "
+                    f"unavailable. Retrying in {delay} seconds..."
+                )
+
+            time.sleep(delay)
+
+
+    # ========================================================
+    # ALL ATTEMPTS FAILED
+    # ========================================================
+
+    if status_box:
+
+        status_box.error(
+            "⚠️ The FastAPI backend could not be reached "
+            "after several automatic attempts."
+        )
+
+        st.caption(
+            "The backend may be waking up on Render. "
+            "Please wait about 30–60 seconds and reload the "
+            "application."
+        )
+
+    return False
+
+
+# ============================================================
+# GENERIC BACKEND CALL WITH RETRY
+# ============================================================
+
+def backend_request_with_retry(
+    method,
+    endpoint,
+    *,
+    json=None,
+    attempts=4,
+    timeout=REQUEST_TIMEOUT
+):
+
+    last_error = None
+
+    delays = [2, 4, 7, 10]
+
+    for attempt in range(attempts):
+
+        try:
+
+            response = make_request(
+                method,
+                endpoint,
+                json=json,
+                timeout=timeout
+            )
+
+            return response
+
+        except BackendUnavailableError as e:
+
             last_error = e
 
-        # Retry after temporary failure
-        if attempt < MAX_RETRIES:
-            time.sleep(RETRY_DELAY)
+            if attempt < attempts - 1:
 
-    raise last_error
+                time.sleep(
+                    delays[
+                        min(
+                            attempt,
+                            len(delays) - 1
+                        )
+                    ]
+                )
+
+    raise BackendUnavailableError(
+        str(last_error)
+        if last_error
+        else "Backend unavailable"
+    )
 
 
 # ============================================================
@@ -142,9 +346,10 @@ def api_request(
 
 def get_industries():
 
-    response = api_request(
+    response = backend_request_with_retry(
         "GET",
-        "/industries"
+        "/industries",
+        attempts=5
     )
 
     return response.json()
@@ -152,12 +357,14 @@ def get_industries():
 
 def build_industry(industry_name):
 
-    response = api_request(
+    response = backend_request_with_retry(
         "POST",
         "/industries/build",
         json={
             "industry": industry_name
-        }
+        },
+        attempts=4,
+        timeout=60
     )
 
     return response.json()
@@ -165,9 +372,10 @@ def build_industry(industry_name):
 
 def get_stages():
 
-    response = api_request(
+    response = backend_request_with_retry(
         "GET",
-        "/stages"
+        "/stages",
+        attempts=4
     )
 
     return response.json()
@@ -175,9 +383,10 @@ def get_stages():
 
 def get_processes():
 
-    response = api_request(
+    response = backend_request_with_retry(
         "GET",
-        "/processes"
+        "/processes",
+        attempts=4
     )
 
     return response.json()
@@ -185,9 +394,11 @@ def get_processes():
 
 def analyze_process(process_id):
 
-    response = api_request(
+    response = backend_request_with_retry(
         "POST",
-        f"/analyze/{process_id}"
+        f"/analyze/{process_id}",
+        attempts=4,
+        timeout=120
     )
 
     return response.json()
@@ -195,37 +406,35 @@ def analyze_process(process_id):
 
 def get_research(process_id):
 
-    response = api_request(
+    response = backend_request_with_retry(
         "GET",
-        f"/research/{process_id}"
+        f"/research/{process_id}",
+        attempts=4
     )
 
     return response.json()
 
 
 # ============================================================
-# BACKEND STARTUP / CONNECTION
+# INITIAL BACKEND CONNECTION
 # ============================================================
 
-# First check whether backend is available.
-backend_available = wait_for_backend()
+backend_ready = wait_for_backend(
+    show_status=True
+)
 
 
-if not backend_available:
+if not backend_ready:
 
     st.warning(
-        "⚠️ The FastAPI backend is currently starting or "
-        "temporarily unavailable."
+        "⚠️ The FastAPI backend is currently starting "
+        "or temporarily unavailable."
     )
 
     st.info(
-        "The application will automatically retry the backend "
-        "connection. Please wait a few seconds and refresh the page."
-    )
-
-    st.code(
-        f"{API_URL}/health",
-        language="text"
+        "The application has already tried automatically. "
+        "Please wait a little and reload this page. "
+        "You do NOT need to open /health or /industries manually."
     )
 
     st.stop()
@@ -239,18 +448,30 @@ try:
 
     industries = get_industries()
 
-except requests.exceptions.RequestException:
+except BackendUnavailableError:
 
-    st.warning(
-        "⚠️ The FastAPI backend could not be reached right now."
-    )
+    # One additional backend wake-up attempt
+    if wait_for_backend(show_status=True):
 
-    st.info(
-        "The backend may be waking up or experiencing a temporary "
-        "network delay. Please wait a few seconds and refresh."
-    )
+        try:
 
-    st.stop()
+            industries = get_industries()
+
+        except Exception as e:
+
+            st.error(
+                f"⚠️ Could not load industries from FastAPI: {e}"
+            )
+
+            st.stop()
+
+    else:
+
+        st.error(
+            "⚠️ Could not connect to the FastAPI backend."
+        )
+
+        st.stop()
 
 
 # ============================================================
@@ -263,20 +484,29 @@ st.markdown(
 
 
 industry_options = [
+
     {
         "label": industry["name"],
         "id": industry["id"],
         "name": industry["name"],
         "description": industry.get("description")
     }
+
     for industry in industries
+
 ]
 
 
-# Add new industry option
+# ============================================================
+# NEW INDUSTRY OPTION
+# ============================================================
+
 industry_labels = [
+
     industry["label"]
+
     for industry in industry_options
+
 ]
 
 industry_labels.append(
@@ -285,10 +515,11 @@ industry_labels.append(
 
 
 # ============================================================
-# DEFAULT INDUSTRY SELECTION
+# DEFAULT SELECTION
 # ============================================================
 
 default_index = 0
+
 
 if st.session_state.selected_industry_name:
 
@@ -361,8 +592,7 @@ if selected_label == "➕ New Industry → User Input":
                     )
 
 
-                    # Industry already exists
-
+                    # Existing industry
                     if (
                         result.get("message")
                         == "Industry already exists"
@@ -392,8 +622,7 @@ if selected_label == "➕ New Industry → User Input":
                         st.rerun()
 
 
-                    # New industry successfully created
-
+                    # New industry created
                     industry_info = result.get(
                         "industry",
                         {}
@@ -426,21 +655,17 @@ if selected_label == "➕ New Industry → User Input":
                     st.rerun()
 
 
-                except requests.exceptions.RequestException as e:
+                except Exception as e:
 
                     st.error(
-                        "Industry generation failed because "
-                        "the backend could not be reached."
-                    )
-
-                    st.caption(
-                        f"Technical details: {e}"
+                        f"❌ Industry generation failed: {e}"
                     )
 
 
     st.info(
-        "💡 Example industries: Banking, Pharmaceutical, "
-        "Telecommunications, Education, Insurance, Aviation."
+        "💡 Example industries: Banking, "
+        "Pharmaceutical, Telecommunications, "
+        "Education, Insurance, Aviation."
     )
 
     st.stop()
@@ -451,12 +676,17 @@ if selected_label == "➕ New Industry → User Input":
 # ============================================================
 
 selected_industry = next(
+
     (
         industry
+
         for industry in industry_options
+
         if industry["label"] == selected_label
     ),
+
     None
+
 )
 
 
@@ -490,15 +720,17 @@ try:
 
     all_processes = get_processes()
 
-except requests.exceptions.RequestException:
+
+except BackendUnavailableError as e:
 
     st.warning(
-        "⚠️ Could not load value-chain data."
+        "⚠️ The backend temporarily became unavailable "
+        "while loading the value-chain data."
     )
 
     st.info(
-        "The FastAPI backend may be temporarily unavailable. "
-        "Please wait a few seconds and refresh."
+        "Please wait a few seconds and reload the page. "
+        "The application will automatically retry the backend."
     )
 
     st.stop()
@@ -509,10 +741,14 @@ except requests.exceptions.RequestException:
 # ============================================================
 
 stages = [
+
     stage
+
     for stage in all_stages
+
     if stage.get("industry_id")
     == selected_industry_id
+
 ]
 
 
@@ -521,16 +757,23 @@ stages = [
 # ============================================================
 
 stage_ids = {
+
     stage["id"]
+
     for stage in stages
+
 }
 
 
 processes = [
+
     process
+
     for process in all_processes
+
     if process.get("stage_id")
     in stage_ids
+
 ]
 
 
@@ -543,10 +786,13 @@ st.title(
     "AI Value Chain Intelligence"
 )
 
+
 st.caption(
     f"Identify and prioritise AI opportunities "
-    f"across the {selected_industry_name.lower()} value chain."
+    f"across the {selected_industry_name.lower()} "
+    "value chain."
 )
+
 
 st.divider()
 
@@ -561,21 +807,29 @@ st.header(
 
 
 industry_description = next(
+
     (
         industry["description"]
+
         for industry in industries
+
         if industry["id"]
         == selected_industry_id
     ),
+
     None
+
 )
 
 
 st.write(
+
     industry_description
+
     or
     f"AI-generated value chain for the "
     f"{selected_industry_name} industry."
+
 )
 
 
@@ -590,7 +844,6 @@ col1, col2, col3, col4 = st.columns(4)
 
 
 # Value Chain Stages
-
 with col1:
 
     st.metric(
@@ -600,7 +853,6 @@ with col1:
 
 
 # Business Processes
-
 with col2:
 
     st.metric(
@@ -610,11 +862,14 @@ with col2:
 
 
 # Analysed Opportunities
-
 analysed = sum(
+
     1
+
     for process in processes
+
     if process.get("ai_opportunity")
+
 )
 
 
@@ -627,12 +882,15 @@ with col3:
 
 
 # High Priority
-
 high_priority = sum(
+
     1
+
     for process in processes
+
     if process.get("priority_level")
     == "High"
+
 )
 
 
@@ -664,16 +922,22 @@ if stages:
     ):
 
         stage_processes = [
+
             process
+
             for process in processes
+
             if process["stage_id"]
             == stage["id"]
+
         ]
 
 
         with st.expander(
+
             f"{i}. {stage['name']} "
             f"({len(stage_processes)} processes)"
+
         ):
 
             st.write(
@@ -698,7 +962,8 @@ if stages:
 else:
 
     st.warning(
-        "No value-chain stages found for this industry."
+        "No value-chain stages found "
+        "for this industry."
     )
 
 
@@ -717,8 +982,11 @@ st.header(
 if processes:
 
     process_names = [
+
         process["name"]
+
         for process in processes
+
     ]
 
 
@@ -729,10 +997,14 @@ if processes:
 
 
     selected_process = next(
+
         process
+
         for process in processes
+
         if process["name"]
         == selected_name
+
     )
 
 
@@ -746,9 +1018,12 @@ if processes:
 
 
     st.write(
+
         selected_process["description"]
+
         or
         "No description available."
+
     )
 
 
@@ -782,36 +1057,37 @@ if processes:
 
 
                 # Refresh processes
-
                 all_processes = get_processes()
 
 
                 processes = [
+
                     process
+
                     for process in all_processes
+
                     if process.get("stage_id")
                     in stage_ids
+
                 ]
 
 
                 selected_process = next(
+
                     process
+
                     for process in processes
+
                     if process["id"]
-                    ==
-                    selected_process["id"]
+                    == selected_process["id"]
+
                 )
 
 
-            except requests.exceptions.RequestException as e:
+            except Exception as e:
 
                 st.error(
-                    "AI analysis could not be completed "
-                    "because the backend is temporarily unavailable."
-                )
-
-                st.caption(
-                    f"Technical details: {e}"
+                    f"❌ AI analysis failed: {e}"
                 )
 
 
@@ -888,11 +1164,14 @@ if processes:
 
 
         st.write(
+
             selected_process.get(
                 "ai_capability"
             )
+
             or
             "Not analysed yet."
+
         )
 
 
@@ -904,11 +1183,14 @@ if processes:
 
 
         st.write(
+
             selected_process.get(
                 "expected_benefit"
             )
+
             or
             "Not analysed yet."
+
         )
 
 
@@ -1055,10 +1337,12 @@ if processes:
             for source in research_sources:
 
                 with st.expander(
+
                     source.get(
                         "title",
                         "Research Source"
                     )
+
                 ):
 
                     st.markdown(
@@ -1089,10 +1373,11 @@ if processes:
             )
 
 
-    except requests.exceptions.RequestException:
+    except BackendUnavailableError:
 
         st.warning(
-            "Could not load research evidence."
+            "⚠️ Research evidence could not be loaded "
+            "because the backend is temporarily unavailable."
         )
 
 
