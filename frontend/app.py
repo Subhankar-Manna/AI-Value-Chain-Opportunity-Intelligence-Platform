@@ -3,13 +3,20 @@ import requests
 import time
 
 
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
 API_URL = "https://ai-value-chain-opportunity-intelligence.onrender.com"
 
-GET_TIMEOUT = 90
-POST_TIMEOUT = 120
-MAX_RETRIES = 3
-RETRY_DELAY = 5
+REQUEST_TIMEOUT = 30
+MAX_RETRIES = 4
+RETRY_DELAY = 3
 
+
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
 
 st.set_page_config(
     page_title="AI Value Chain Intelligence",
@@ -17,7 +24,10 @@ st.set_page_config(
     layout="wide"
 )
 
+
+# ============================================================
 # SESSION STATE
+# ============================================================
 
 if "selected_industry_id" not in st.session_state:
     st.session_state.selected_industry_id = None
@@ -26,161 +36,196 @@ if "selected_industry_name" not in st.session_state:
     st.session_state.selected_industry_name = None
 
 
+# ============================================================
 # BACKEND CONNECTION HELPERS
+# ============================================================
 
-def api_get(endpoint, timeout=GET_TIMEOUT, retries=MAX_RETRIES):
+def backend_health_check():
     """
-    Send GET request to FastAPI backend.
-
-    Includes retry handling because Render Free services
-    may take some time to wake up after inactivity.
+    Check whether the FastAPI backend is available.
+    Uses the /health endpoint before making normal API requests.
     """
 
-    last_error = None
+    try:
+        response = requests.get(
+            f"{API_URL}/health",
+            timeout=REQUEST_TIMEOUT
+        )
 
-    for attempt in range(1, retries + 1):
+        if response.status_code == 200:
+            try:
+                data = response.json()
 
-        try:
+                if data.get("status") == "healthy":
+                    return True
 
-            response = requests.get(
-                f"{API_URL}{endpoint}",
-                timeout=timeout
-            )
+            except ValueError:
+                pass
 
-            response.raise_for_status()
+    except requests.exceptions.RequestException:
+        pass
 
-            return response.json()
-
-        except requests.exceptions.RequestException as e:
-
-            last_error = e
-
-            if attempt < retries:
-
-                time.sleep(RETRY_DELAY)
-
-            else:
-
-                raise last_error
+    return False
 
 
-def api_post(
+def wait_for_backend():
+    """
+    Try several times to wake up/connect to the Render backend.
+    """
+
+    for attempt in range(1, MAX_RETRIES + 1):
+
+        if backend_health_check():
+            return True
+
+        if attempt < MAX_RETRIES:
+            time.sleep(RETRY_DELAY)
+
+    return False
+
+
+def api_request(
+    method,
     endpoint,
-    json_data=None,
-    timeout=POST_TIMEOUT,
-    retries=MAX_RETRIES
+    **kwargs
 ):
     """
-    Send POST request to FastAPI backend.
+    Centralized API request function.
 
-    Includes retry handling for Render startup delays.
+    Every API request gets retry handling so that a temporary
+    Render/network problem does not immediately break Streamlit.
     """
+
+    url = f"{API_URL}{endpoint}"
 
     last_error = None
 
-    for attempt in range(1, retries + 1):
+    for attempt in range(1, MAX_RETRIES + 1):
 
         try:
 
-            response = requests.post(
-                f"{API_URL}{endpoint}",
-                json=json_data,
-                timeout=timeout
+            response = requests.request(
+                method,
+                url,
+                timeout=REQUEST_TIMEOUT,
+                **kwargs
             )
 
-            response.raise_for_status()
+            # Successful response
+            if 200 <= response.status_code < 300:
+                return response
 
-            return response.json()
+            # Server-side temporary error
+            if response.status_code >= 500:
+
+                last_error = requests.exceptions.HTTPError(
+                    f"Backend returned HTTP {response.status_code}"
+                )
+
+            else:
+                response.raise_for_status()
 
         except requests.exceptions.RequestException as e:
 
             last_error = e
 
-            if attempt < retries:
+        # Retry after temporary failure
+        if attempt < MAX_RETRIES:
+            time.sleep(RETRY_DELAY)
 
-                time.sleep(RETRY_DELAY)
-
-            else:
-
-                raise last_error
+    raise last_error
 
 
 # ============================================================
-# BACKEND API FUNCTIONS
+# API FUNCTIONS
 # ============================================================
-
-def check_backend_health():
-
-    return api_get(
-        "/health",
-        timeout=GET_TIMEOUT,
-        retries=MAX_RETRIES
-    )
-
 
 def get_industries():
 
-    return api_get(
+    response = api_request(
+        "GET",
         "/industries"
     )
+
+    return response.json()
 
 
 def build_industry(industry_name):
 
-    return api_post(
+    response = api_request(
+        "POST",
         "/industries/build",
-        json_data={
+        json={
             "industry": industry_name
         }
     )
 
+    return response.json()
+
 
 def get_stages():
 
-    return api_get(
+    response = api_request(
+        "GET",
         "/stages"
     )
+
+    return response.json()
 
 
 def get_processes():
 
-    return api_get(
+    response = api_request(
+        "GET",
         "/processes"
     )
+
+    return response.json()
 
 
 def analyze_process(process_id):
 
-    return api_post(
+    response = api_request(
+        "POST",
         f"/analyze/{process_id}"
     )
+
+    return response.json()
 
 
 def get_research(process_id):
 
-    return api_get(
+    response = api_request(
+        "GET",
         f"/research/{process_id}"
     )
 
+    return response.json()
+
 
 # ============================================================
-# BACKEND CONNECTION CHECK
+# BACKEND STARTUP / CONNECTION
 # ============================================================
 
-try:
+# First check whether backend is available.
+backend_available = wait_for_backend()
 
-    health_status = check_backend_health()
 
-except requests.exceptions.RequestException:
+if not backend_available:
 
-    st.error(
+    st.warning(
         "⚠️ The FastAPI backend is currently starting or "
         "temporarily unavailable."
     )
 
     st.info(
-        "Please wait a few seconds and refresh the page. "
-        "The backend may be waking up from inactivity."
+        "The application will automatically retry the backend "
+        "connection. Please wait a few seconds and refresh the page."
+    )
+
+    st.code(
+        f"{API_URL}/health",
+        language="text"
     )
 
     st.stop()
@@ -194,26 +239,16 @@ try:
 
     industries = get_industries()
 
-except requests.exceptions.RequestException as e:
+except requests.exceptions.RequestException:
 
-    st.error(
-        "⚠️ Could not connect to the FastAPI backend."
+    st.warning(
+        "⚠️ The FastAPI backend could not be reached right now."
     )
 
     st.info(
-        "The backend may still be starting. "
-        "Please refresh the page after a few seconds."
+        "The backend may be waking up or experiencing a temporary "
+        "network delay. Please wait a few seconds and refresh."
     )
-
-    with st.expander("Connection Details"):
-
-        st.write(
-            f"Backend URL: {API_URL}"
-        )
-
-        st.write(
-            f"Error: {e}"
-        )
 
     st.stop()
 
@@ -228,31 +263,21 @@ st.markdown(
 
 
 industry_options = [
-
     {
         "label": industry["name"],
         "id": industry["id"],
         "name": industry["name"],
         "description": industry.get("description")
     }
-
     for industry in industries
-
 ]
 
 
-# ============================================================
-# ADD NEW INDUSTRY OPTION
-# ============================================================
-
+# Add new industry option
 industry_labels = [
-
     industry["label"]
-
     for industry in industry_options
-
 ]
-
 
 industry_labels.append(
     "➕ New Industry → User Input"
@@ -260,11 +285,10 @@ industry_labels.append(
 
 
 # ============================================================
-# DETERMINE DEFAULT SELECTION
+# DEFAULT INDUSTRY SELECTION
 # ============================================================
 
 default_index = 0
-
 
 if st.session_state.selected_industry_name:
 
@@ -337,9 +361,7 @@ if selected_label == "➕ New Industry → User Input":
                     )
 
 
-                    # ========================================
-                    # INDUSTRY ALREADY EXISTS
-                    # ========================================
+                    # Industry already exists
 
                     if (
                         result.get("message")
@@ -354,7 +376,6 @@ if selected_label == "➕ New Industry → User Input":
                             "industry"
                         )
 
-
                         st.session_state.selected_industry_id = (
                             industry_id
                         )
@@ -362,7 +383,6 @@ if selected_label == "➕ New Industry → User Input":
                         st.session_state.selected_industry_name = (
                             industry_name
                         )
-
 
                         st.warning(
                             f"{industry_name} already exists. "
@@ -372,20 +392,16 @@ if selected_label == "➕ New Industry → User Input":
                         st.rerun()
 
 
-                    # ========================================
-                    # NEW INDUSTRY SUCCESSFULLY CREATED
-                    # ========================================
+                    # New industry successfully created
 
                     industry_info = result.get(
                         "industry",
                         {}
                     )
 
-
                     industry_id = industry_info.get(
                         "id"
                     )
-
 
                     industry_name = industry_info.get(
                         "name",
@@ -407,32 +423,24 @@ if selected_label == "➕ New Industry → User Input":
                         "generated successfully!"
                     )
 
-
                     st.rerun()
 
 
                 except requests.exceptions.RequestException as e:
 
                     st.error(
-                        "❌ Industry generation failed."
+                        "Industry generation failed because "
+                        "the backend could not be reached."
                     )
 
-                    st.info(
-                        "The backend may be waking up. "
-                        "Please wait and try again."
+                    st.caption(
+                        f"Technical details: {e}"
                     )
-
-                    with st.expander(
-                        "Error Details"
-                    ):
-
-                        st.write(e)
 
 
     st.info(
-        "💡 Example industries: Banking, "
-        "Pharmaceutical, Telecommunications, "
-        "Education, Insurance, Aviation."
+        "💡 Example industries: Banking, Pharmaceutical, "
+        "Telecommunications, Education, Insurance, Aviation."
     )
 
     st.stop()
@@ -443,17 +451,12 @@ if selected_label == "➕ New Industry → User Input":
 # ============================================================
 
 selected_industry = next(
-
     (
         industry
-
         for industry in industry_options
-
         if industry["label"] == selected_label
     ),
-
     None
-
 )
 
 
@@ -472,7 +475,6 @@ selected_industry_id = (
     st.session_state.selected_industry_id
 )
 
-
 selected_industry_name = (
     st.session_state.selected_industry_name
 )
@@ -488,22 +490,16 @@ try:
 
     all_processes = get_processes()
 
-except requests.exceptions.RequestException as e:
+except requests.exceptions.RequestException:
 
-    st.error(
+    st.warning(
         "⚠️ Could not load value-chain data."
     )
 
     st.info(
         "The FastAPI backend may be temporarily unavailable. "
-        "Please refresh the page."
+        "Please wait a few seconds and refresh."
     )
-
-    with st.expander(
-        "Connection Details"
-    ):
-
-        st.write(e)
 
     st.stop()
 
@@ -513,14 +509,10 @@ except requests.exceptions.RequestException as e:
 # ============================================================
 
 stages = [
-
     stage
-
     for stage in all_stages
-
     if stage.get("industry_id")
     == selected_industry_id
-
 ]
 
 
@@ -529,23 +521,16 @@ stages = [
 # ============================================================
 
 stage_ids = {
-
     stage["id"]
-
     for stage in stages
-
 }
 
 
 processes = [
-
     process
-
     for process in all_processes
-
     if process.get("stage_id")
     in stage_ids
-
 ]
 
 
@@ -558,13 +543,10 @@ st.title(
     "AI Value Chain Intelligence"
 )
 
-
 st.caption(
     f"Identify and prioritise AI opportunities "
-    f"across the {selected_industry_name.lower()} "
-    "value chain."
+    f"across the {selected_industry_name.lower()} value chain."
 )
-
 
 st.divider()
 
@@ -579,31 +561,21 @@ st.header(
 
 
 industry_description = next(
-
     (
-
         industry["description"]
-
         for industry in industries
-
         if industry["id"]
         == selected_industry_id
-
     ),
-
     None
-
 )
 
 
 st.write(
-
     industry_description
-
     or
     f"AI-generated value chain for the "
     f"{selected_industry_name} industry."
-
 )
 
 
@@ -617,7 +589,7 @@ st.divider()
 col1, col2, col3, col4 = st.columns(4)
 
 
-# VALUE CHAIN STAGES
+# Value Chain Stages
 
 with col1:
 
@@ -627,7 +599,7 @@ with col1:
     )
 
 
-# BUSINESS PROCESSES
+# Business Processes
 
 with col2:
 
@@ -637,16 +609,12 @@ with col2:
     )
 
 
-# ANALYSED OPPORTUNITIES
+# Analysed Opportunities
 
 analysed = sum(
-
     1
-
     for process in processes
-
     if process.get("ai_opportunity")
-
 )
 
 
@@ -658,17 +626,13 @@ with col3:
     )
 
 
-# HIGH PRIORITY
+# High Priority
 
 high_priority = sum(
-
     1
-
     for process in processes
-
     if process.get("priority_level")
     == "High"
-
 )
 
 
@@ -700,22 +664,16 @@ if stages:
     ):
 
         stage_processes = [
-
             process
-
             for process in processes
-
             if process["stage_id"]
             == stage["id"]
-
         ]
 
 
         with st.expander(
-
             f"{i}. {stage['name']} "
             f"({len(stage_processes)} processes)"
-
         ):
 
             st.write(
@@ -759,11 +717,8 @@ st.header(
 if processes:
 
     process_names = [
-
         process["name"]
-
         for process in processes
-
     ]
 
 
@@ -774,14 +729,10 @@ if processes:
 
 
     selected_process = next(
-
         process
-
         for process in processes
-
         if process["name"]
         == selected_name
-
     )
 
 
@@ -795,12 +746,9 @@ if processes:
 
 
     st.write(
-
         selected_process["description"]
-
         or
         "No description available."
-
     )
 
 
@@ -828,60 +776,43 @@ if processes:
                     selected_process["id"]
                 )
 
-
                 st.success(
                     "✅ AI analysis completed successfully!"
                 )
 
 
-                # ============================================
-                # REFRESH PROCESSES
-                # ============================================
+                # Refresh processes
 
                 all_processes = get_processes()
 
 
                 processes = [
-
                     process
-
                     for process in all_processes
-
                     if process.get("stage_id")
                     in stage_ids
-
                 ]
 
 
                 selected_process = next(
-
                     process
-
                     for process in processes
-
                     if process["id"]
-                    == selected_process["id"]
-
+                    ==
+                    selected_process["id"]
                 )
 
 
             except requests.exceptions.RequestException as e:
 
                 st.error(
-                    "❌ AI analysis failed."
+                    "AI analysis could not be completed "
+                    "because the backend is temporarily unavailable."
                 )
 
-                st.info(
-                    "The backend may be starting or "
-                    "temporarily unavailable. "
-                    "Please try again."
+                st.caption(
+                    f"Technical details: {e}"
                 )
-
-                with st.expander(
-                    "Error Details"
-                ):
-
-                    st.write(e)
 
 
     st.divider()
@@ -957,14 +888,11 @@ if processes:
 
 
         st.write(
-
             selected_process.get(
                 "ai_capability"
             )
-
             or
             "Not analysed yet."
-
         )
 
 
@@ -976,14 +904,11 @@ if processes:
 
 
         st.write(
-
             selected_process.get(
                 "expected_benefit"
             )
-
             or
             "Not analysed yet."
-
         )
 
 
@@ -1033,27 +958,20 @@ if processes:
         with col1:
 
             st.metric(
-
                 "Priority Score",
-
                 f"{selected_process['priority_score']}/10"
-
             )
 
 
         with col2:
 
             st.metric(
-
                 "Priority Level",
-
                 selected_process.get(
                     "priority_level"
                 )
-
                 or
                 "Not available"
-
             )
 
 
@@ -1068,63 +986,48 @@ if processes:
         with col1:
 
             st.metric(
-
                 "Business Value",
-
                 selected_process.get(
                     "value_score"
                 )
-
             )
 
 
         with col2:
 
             st.metric(
-
                 "Feasibility",
-
                 selected_process.get(
                     "feasibility_score"
                 )
-
             )
 
 
         with col3:
 
             st.metric(
-
                 "Risk",
-
                 selected_process.get(
                     "risk_score"
                 )
-
             )
 
 
         with col4:
 
             st.metric(
-
                 "Confidence",
-
                 selected_process.get(
                     "confidence_score"
                 )
-
             )
 
 
     else:
 
         st.info(
-
             "Priority has not been calculated yet. "
-
             "Click 'Analyze with AI' to analyse this process."
-
         )
 
 
@@ -1152,61 +1055,45 @@ if processes:
             for source in research_sources:
 
                 with st.expander(
-
                     source.get(
                         "title",
                         "Research Source"
                     )
-
                 ):
 
                     st.markdown(
-
                         f"**Source Type:** "
                         f"{source.get('source_type', 'N/A')}"
-
                     )
 
 
                     st.markdown(
-
                         f"**Evidence:** "
                         f"{source.get('evidence', 'N/A')}"
-
                     )
 
 
                     if source.get("url"):
 
                         st.markdown(
-
                             f"**Source:** "
                             f"[View Source]"
                             f"({source['url']})"
-
                         )
 
         else:
 
             st.info(
-
                 "No research evidence available "
                 "for this process."
-
             )
 
 
-    except requests.exceptions.RequestException as e:
+    except requests.exceptions.RequestException:
 
         st.warning(
             "Could not load research evidence."
         )
-
-        with st.expander(
-            "Connection Details"
-        ):
-
-            st.write(e)
 
 
 else:
@@ -1214,4 +1101,3 @@ else:
     st.info(
         "No processes available for this industry."
     )
-
